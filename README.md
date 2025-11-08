@@ -18,6 +18,7 @@ Script flexible para monitorizar tráfico de red y capturar paquetes por puerto,
   ```
   > `nmap-ncat` proporciona `nc`; `wireshark-cli` instala `tshark`.
 - Permisos `sudo` para capturar tráfico en interfaces de red.
+- Python 3.9+ (para ejecutar `analyze_captures.py`).
 
 ## 📦 Instalación y configuración
 1. Clona o copia el repositorio:
@@ -158,6 +159,45 @@ sudo ./monitor_ports.sh --stop
 2. Clasifica: ¿dispositivo conocido? ¿aplicación legítima?
 3. Investiga IPs/dominios externos en fuentes como VirusTotal o AbuseIPDB.
 4. Documenta hallazgos (timestamps, IP, puerto, resumen) y decide acciones: bloqueo de MAC, cambio de credenciales, análisis en endpoint, etc.
+
+## 🤖 Automatización con `analyze_captures.py`
+Cuando tengas varias sesiones de captura resulta práctico generar un informe automático. Este repositorio incluye el script `analyze_captures.py`, escrito en Python, que resume los `.log` y los `.pcap` generados por `monitor_ports.sh`.
+
+### Ejecución básica
+```bash
+python3 analyze_captures.py --path ~/capturas --top 8
+```
+
+### Qué hace el informe
+- Lista los top orígenes y destinos por número de paquetes vistos en los logs.
+- Agrupa los flujos principales (IP origen, IP destino, puerto destino) y muestra volumen aproximado (bytes) y protocolos.
+- Marca como "sospechosos" los flujos hacia IPs públicas cuyo volumen supere el umbral configurable (`--suspect-threshold`, por defecto 5 MB).
+- Construye una línea de tiempo por minuto para detectar picos de actividad.
+- Si `tshark` y `capinfos` están disponibles, analiza los `pcap` más grandes para extraer conversaciones y distribución de protocolos.
+
+### Opciones útiles
+| Bandera | Descripción |
+|---------|-------------|
+| `--path` | Directorio donde se guardan capturas y logs (por defecto `./capturas`). |
+| `--top` | Número de elementos a mostrar en los rankings (defecto 10). |
+| `--suspect-threshold` | Megabytes mínimos para considerar sospechoso un flujo a destino público. |
+| `--max-pcaps` | Número de archivos `.pcap` grandes que se analizarán con `tshark/capinfos`. |
+| `--skip-pcap` | Evita invocar herramientas externas; útil si sólo hay logs. |
+| `--json` | Emite un bloque JSON con el resumen para integraciones (dashboards, SIEM, etc.). |
+
+### Ejemplo completo
+```bash
+# Generar capturas
+sudo ./monitor_ports.sh -m all -i wlp3s0 -o ~/capturas -t --exclude-port 5353,3702
+
+# Detener cuando hayas recopilado suficiente evidencia
+sudo ./monitor_ports.sh --stop
+
+# Analizar automáticamente
+python3 analyze_captures.py --path ~/capturas --top 10 --suspect-threshold 3 --json
+```
+
+El script puede ejecutarse tantas veces como quieras; ignora archivos sin datos y reporta cualquier log que no pueda leer en la sección de "LOGS SIN PROCESAR".
 
 ## 🧭 Buenas prácticas
 - Ejecuta `sudo ./monitor_ports.sh --stop` antes de iniciar nuevas sesiones para evitar procesos huérfanos.
