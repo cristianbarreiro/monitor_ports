@@ -1,0 +1,14 @@
+# Capturas y registros generados por el script
+capturas/
+*.pcap
+*.pcapng
+*.log
+
+# Archivos temporales comunes
+*.tmp
+*.swp
+*.swo
+
+# Sistemas operativos
+.DS_Store
+Thumbs.db
