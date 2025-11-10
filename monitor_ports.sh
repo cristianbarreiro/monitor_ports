@@ -214,13 +214,12 @@ apply_exclusions() {
     if [[ -n "$EXCLUDE_HOSTS" ]]; then
         IFS=',' read -r -a EX_H_ARR <<< "$EXCLUDE_HOSTS"
         for eh in "${EX_H_ARR[@]}"; do
-            local term=""
-            if [[ "$eh" =~ \/ ]]; then
-                # CIDR
-                term="net $eh"
-            else
-                term="host $eh"
+            # Validación básica - solo evitar caracteres peligrosos
+            if [[ "$eh" =~ [\;\|\&\`\$] ]]; then
+                echo "Host a excluir contiene caracteres peligrosos: $eh" >&2
+                return 1
             fi
+            local term="host $eh"
             if [[ -n "$exclude_hosts_expr" ]]; then exclude_hosts_expr+=" or "; fi
             exclude_hosts_expr+="$term"
         done
