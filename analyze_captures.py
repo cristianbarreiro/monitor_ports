@@ -12,7 +12,6 @@ Requisitos opcionales:
 - tshark (wireshark-cli) y capinfos para secciones avanzadas. El script funciona sin ellos.
 """
 from __future__ import annotations
-
 import argparse
 import ipaddress
 import re

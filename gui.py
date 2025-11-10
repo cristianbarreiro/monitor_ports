@@ -17,7 +17,7 @@ class PortMonitorGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Monitor de Puertos - GUI")
-        self.root.geometry("500x700")
+        self.root.geometry("600x700")
         
         # Variables de estado
         self.monitor_process: Optional[subprocess.Popen] = None
@@ -166,6 +166,12 @@ class PortMonitorGUI:
                                       command=self.run_analysis, style="Accent.TButton")
         self.analyze_btn.pack(side="left", padx=5)
         
+        ttk.Button(
+            control_frame,
+            text="Copiar Resultado",
+            command=self.copy_analysis_output,
+        ).pack(side="left", padx=5)
+
         ttk.Button(control_frame, text="Limpiar Salida", 
                   command=lambda: self.analysis_output.delete(1.0, tk.END)).pack(side="left", padx=5)
         
@@ -175,6 +181,11 @@ class PortMonitorGUI:
         
         self.analysis_output = scrolledtext.ScrolledText(output_frame, height=20, wrap=tk.WORD)
         self.analysis_output.pack(fill="both", expand=True)
+        self.analysis_output.bind("<Control-c>", self.copy_analysis_output)
+        self.analysis_output.bind("<Control-C>", self.copy_analysis_output)
+        # macOS compatibility
+        self.analysis_output.bind("<Command-c>", self.copy_analysis_output)
+        self.analysis_output.bind("<Command-C>", self.copy_analysis_output)
         
     def on_mode_change(self, event=None):
         """Habilita/deshabilita el campo de puertos según el modo"""
@@ -409,14 +420,17 @@ class PortMonitorGUI:
             return
         
         # Validar que existe el directorio de capturas
-        capture_path = Path(self.analysis_path_var.get())
+        capture_path_str = os.path.expanduser(self.analysis_path_var.get())
+        capture_path = Path(capture_path_str)
         if not capture_path.exists():
             messagebox.showerror("Error", f"El directorio no existe: {capture_path}")
             return
+        # Usar ruta absoluta para evitar depender del cwd
+        capture_path_abs = str(capture_path.resolve())
             
         # Construir comando
-        cmd = [sys.executable, str(analysis_script)]
-        cmd.extend(["--path", self.analysis_path_var.get()])
+        cmd = [sys.executable, "-u", str(analysis_script)]
+        cmd.extend(["--path", capture_path_abs])
         
         try:
             top_n = int(self.top_var.get())
@@ -454,7 +468,7 @@ class PortMonitorGUI:
         self.log_analysis("║           ANÁLISIS DE CAPTURAS DE TRÁFICO DE RED              ║\n")
         self.log_analysis("╚═══════════════════════════════════════════════════════════════╝\n\n")
         
-        self.log_analysis(f"📁 Directorio: {self.analysis_path_var.get()}\n")
+        self.log_analysis(f"📁 Directorio: {capture_path_abs}\n")
         self.log_analysis(f"🔝 Top N: {self.top_var.get()}\n")
         self.log_analysis(f"⚠️  Umbral sospechoso: {self.threshold_var.get()} MB\n")
         self.log_analysis(f"📦 Max PCAPs: {self.max_pcaps_var.get()}\n\n")
@@ -472,40 +486,101 @@ class PortMonitorGUI:
         def run():
             import time
             start_time = time.time()
-            
+            self.log_analysis("[DBG] run() iniciado\n")
+            log_path = Path("/tmp/monitor_ports_gui_analyze.log")
+            log_f = open(log_path, "a", buffering=1, encoding="utf-8", errors="ignore")
+            last_output_time = [start_time]
+            self.log_analysis(f"[DBG] log: {log_path}\n")
+
+            def write_file(line: str):
+                ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                try:
+                    log_f.write(f"[{ts}] {line}")
+                except Exception:
+                    pass
+
             try:
-                # Ejecutar el análisis con captura de salida en tiempo real
+                # Ejecutar el análisis con Popen para output en tiempo real
+                # Asegurar mismo cwd que el script y forzar IO sin buffer
+                env = os.environ.copy()
+                env.setdefault("PYTHONUNBUFFERED", "1")
                 process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                     bufsize=1,
-                    universal_newlines=True
+                    universal_newlines=True,
+                    cwd=str(self.script_dir),
+                    env=env,
                 )
+                self.log_analysis(f"[DBG] proceso lanzado PID={process.pid}\n")
+                write_file(f"[DBG] process started pid={process.pid}\n")
                 
-                # Leer salida en tiempo real
-                stdout_lines = []
+                # Thread killer para timeout
+                def killer():
+                    time.sleep(300)
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+                
+                killer_thread = threading.Thread(target=killer, daemon=True)
+                killer_thread.start()
+
+                def heartbeat():
+                    import time as _t
+                    self.log_analysis("[DBG] heartbeat iniciado\n")
+                    while True:
+                        if process.poll() is not None:
+                            break
+                        if _t.time() - last_output_time[0] > 2:
+                            msg = "."
+                            self.log_analysis(msg)
+                            write_file(msg + "\n")
+                            last_output_time[0] = _t.time()
+                        _t.sleep(2)
+
+                heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+                heartbeat_thread.start()
+                
                 stderr_lines = []
+
+                # Consumir stderr en un hilo separado para evitar bloqueos
+                def drain_stderr():
+                    self.log_analysis("[DBG] hilo stderr iniciado\n")
+                    for err_line in iter(process.stderr.readline, ''):
+                        if err_line:
+                            stderr_lines.append(err_line)
+                            # Mostrar stderr en vivo para feedback inmediato
+                            self.log_analysis(err_line)
+                            write_file(err_line)
+                            last_output_time[0] = time.time()
+
+                stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+                stderr_thread.start()
+
+                # Leer stdout en tiempo real
+                self.log_analysis("[DBG] bucle stdout iniciado\n")
+                for line in iter(process.stdout.readline, ''):
+                    if line:
+                        self.log_analysis(line)
+                        write_file(line)
+                        last_output_time[0] = time.time()
+
+                process.stdout.close()
+                stderr_thread.join(timeout=1)
+                stderr_content = ''.join(stderr_lines)
                 
-                # Leer stdout
-                for line in process.stdout:
-                    stdout_lines.append(line)
-                    self.log_analysis(line)
-                
-                process.wait()
-                
-                # Leer stderr si existe
-                stderr_content = process.stderr.read()
-                if stderr_content:
-                    stderr_lines = stderr_content.splitlines(keepends=True)
+                # Esperar a que termine
+                return_code = process.wait()
                 
                 elapsed_time = time.time() - start_time
                 
                 # Separador antes del resumen
                 self.log_analysis("\n" + "═" * 65 + "\n")
                 
-                if process.returncode == 0:
+                if return_code == 0:
                     self.log_analysis("\n✅ ANÁLISIS COMPLETADO EXITOSAMENTE\n\n")
                     self.log_analysis(f"⏱️  Tiempo transcurrido: {elapsed_time:.2f} segundos\n")
                     self.log_analysis(f"📊 Resultados mostrados arriba\n")
@@ -515,29 +590,27 @@ class PortMonitorGUI:
                         "Análisis completado", 
                         f"El análisis se completó exitosamente en {elapsed_time:.1f} segundos"
                     ))
+                elif return_code == -9:  # Killed
+                    self.log_analysis(f"\n❌ ERROR: El análisis fue terminado por timeout (5 minutos)\n\n")
+                    self.root.after(0, lambda: messagebox.showerror(
+                        "Timeout", 
+                        "El análisis excedió el tiempo límite de 5 minutos y fue cancelado"
+                    ))
                 else:
-                    self.log_analysis(f"\n❌ ERROR: El análisis terminó con código: {process.returncode}\n\n")
-                    if stderr_lines:
+                    self.log_analysis(f"\n❌ ERROR: El análisis terminó con código: {return_code}\n\n")
+                    if stderr_content:
                         self.log_analysis("\n📋 Errores detectados:\n")
                         self.log_analysis("─" * 65 + "\n")
-                        for line in stderr_lines:
-                            self.log_analysis(line)
+                        self.log_analysis(stderr_content)
                     
                     # Mostrar notificación de error
                     self.root.after(0, lambda: messagebox.showerror(
                         "Error en el análisis", 
-                        f"El análisis falló con código {process.returncode}"
+                        f"El análisis falló con código {return_code}"
                     ))
                     
                 self.log_analysis("\n" + "═" * 65 + "\n")
                     
-            except subprocess.TimeoutExpired:
-                self.log_analysis("\n❌ ERROR: Tiempo de espera excedido (5 minutos)\n")
-                self.log_analysis("El análisis tomó demasiado tiempo. Intenta con menos archivos.\n")
-                self.root.after(0, lambda: messagebox.showerror(
-                    "Timeout", 
-                    "El análisis excedió el tiempo límite de 5 minutos"
-                ))
             except Exception as e:
                 self.log_analysis(f"\n❌ ERROR INESPERADO: {e}\n")
                 self.root.after(0, lambda: messagebox.showerror(
@@ -545,23 +618,49 @@ class PortMonitorGUI:
                     f"Error inesperado durante el análisis: {e}"
                 ))
             finally:
+                try:
+                    log_f.close()
+                except Exception:
+                    pass
                 self.root.after(0, lambda: self.analyze_btn.config(state="normal"))
                 
         threading.Thread(target=run, daemon=True).start()
         
     def log_monitor(self, text):
-        """Agrega texto al área de salida del monitor"""
-        def append():
-            self.monitor_output.insert(tk.END, text)
-            self.monitor_output.see(tk.END)
-        self.root.after(0, append)
+        """Salida solo por consola para evitar segfaults en Tk"""
+        try:
+            print(text, end="", flush=True)
+        except Exception:
+            pass
+        return
         
     def log_analysis(self, text):
-        """Agrega texto al área de salida del análisis"""
-        def append():
-            self.analysis_output.insert(tk.END, text)
-            self.analysis_output.see(tk.END)
-        self.root.after(0, append)
+        """Salida solo por consola para evitar segfaults en Tk"""
+        try:
+            print(text, end="", flush=True)
+        except Exception:
+            pass
+        return
+
+    def copy_analysis_output(self, event=None):
+        """Copia la selección (o todo el texto) del análisis al portapapeles"""
+        try:
+            # Si hay selección, usarla
+            selected = self.analysis_output.selection_get()
+        except tk.TclError:
+            selected = self.analysis_output.get(1.0, tk.END).strip()
+
+        if not selected:
+            if event is None:
+                messagebox.showinfo("Información", "No hay texto para copiar")
+            return "break" if event else None
+
+        self.root.clipboard_clear()
+        self.root.clipboard_append(selected)
+        self.root.update_idletasks()
+        if event is None:
+            messagebox.showinfo("Copiado", "Resultado copiado al portapapeles")
+        return "break" if event else None
         
     def update_monitor_buttons(self):
         """Actualiza el estado de los botones de monitoreo"""
