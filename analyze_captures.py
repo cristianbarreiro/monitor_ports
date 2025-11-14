@@ -21,8 +21,14 @@ import subprocess
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+
+
+def log(msg: str) -> None:
+    """Prints a message with flush to ensure GUI streaming."""
+    print(msg, flush=True)
 
 ServiceMap = Dict[str, int]
 
@@ -182,12 +188,15 @@ def parse_logs(log_files: Iterable[Path]) -> AnalysisResult:
 
     for logfile in log_files:
         try:
+            log(f"→ Procesando log: {logfile.name} …")
             content = logfile.read_text(errors="ignore")
         except Exception as exc:  # noqa: BLE001
             errors.append(f"No se pudo leer {logfile}: {exc}")
             continue
 
-        for line in content.splitlines():
+        lines = content.splitlines()
+        log(f"   Líneas: {len(lines)}")
+        for line in lines:
             if ">" not in line:
                 continue
             match = FLOW_RE.search(line)
@@ -343,11 +352,15 @@ def analyze_pcaps(pcaps: List[Path], max_pcaps: int) -> List[Dict[str, object]]:
     sorted_pcaps = sorted(pcaps, key=lambda p: p.stat().st_size, reverse=True)[:max_pcaps]
     results: List[Dict[str, object]] = []
     for pcap in sorted_pcaps:
+        log(f"→ Analizando PCAP grande: {pcap.name} …")
+        log("   Ejecutando capinfos …")
         info_output = run_command(["capinfos", str(pcap)])
         conv_output = None
         proto_output = None
         if shutil_which("tshark"):
+            log("   Ejecutando tshark conv,ip …")
             conv_output = run_command(["tshark", "-r", str(pcap), "-q", "-z", "conv,ip"])
+            log("   Ejecutando tshark io,phs …")
             proto_output = run_command(["tshark", "-r", str(pcap), "-q", "-z", "io,phs"])
         results.append({
             "pcap": str(pcap),
@@ -355,6 +368,7 @@ def analyze_pcaps(pcaps: List[Path], max_pcaps: int) -> List[Dict[str, object]]:
             "conversations": conv_output,
             "protocols": proto_output,
         })
+        log(f"   Listo: {pcap.name}")
     return results
 
 
@@ -365,61 +379,71 @@ def shutil_which(binary: str) -> bool:
 
 
 def print_text_report(summary: Dict[str, List[Dict[str, object]]], pcap_info: List[Dict[str, object]], top_n: int) -> None:
-    print("\n=== TOP IP ORIGEN ===")
+    # Deprecated: use generate_text_report() if you need the string. Kept for compatibility.
+    print(generate_text_report(summary, pcap_info, top_n))
+
+
+def generate_text_report(summary: Dict[str, List[Dict[str, object]]], pcap_info: List[Dict[str, object]], top_n: int) -> str:
+    """Builds and returns the textual report (instead of printing)."""
+    out_lines: List[str] = []
+
+    out_lines.append("\n=== TOP IP ORIGEN ===")
     for item in summary.get("top_sources", []):
-        print(f"{item['ip']:>18}  {item['packets']} pkt")
+        out_lines.append(f"{item['ip']:>18}  {item['packets']} pkt")
 
-    print("\n=== TOP IP DESTINO ===")
+    out_lines.append("\n=== TOP IP DESTINO ===")
     for item in summary.get("top_destinations", []):
-        print(f"{item['ip']:>18}  {item['packets']} pkt")
+        out_lines.append(f"{item['ip']:>18}  {item['packets']} pkt")
 
-    print("\n=== FLOWS PRINCIPALES ===")
+    out_lines.append("\n=== FLOWS PRINCIPALES ===")
     for item in summary.get("flows", []):
         proto = ",".join(f"{k}:{v}" for k, v in item.get("protocols", {}).items())
-        print(
+        out_lines.append(
             f"{item['src']} -> {item['dst']}:{item['dst_port']} | "
             f"{item['packets']} pkt | {item['bytes_h']} | protos {proto or 'N/A'}"
         )
 
     suspects = summary.get("suspects", [])
-    print("\n=== SOSPECHOSOS (destino público) ===")
+    out_lines.append("\n=== SOSPECHOSOS (destino público) ===")
     if not suspects:
-        print("(ninguno supera el umbral configurado)")
+        out_lines.append("(ninguno supera el umbral configurado)")
     else:
         for item in suspects:
             proto = ",".join(f"{k}:{v}" for k, v in item.get("protocols", {}).items())
-            print(
+            out_lines.append(
                 f"{item['src']} -> {item['dst']}:{item['dst_port']} | {item['packets']} pkt | "
                 f"{item['bytes_h']} | protos {proto or 'N/A'}"
             )
 
     if summary.get("timeline"):
-        print("\n=== DISTRIBUCIÓN TEMPORAL (por minuto) ===")
+        out_lines.append("\n=== DISTRIBUCIÓN TEMPORAL (por minuto) ===")
         t_summary = summary.get("timeline_summary", {})
-        print(
+        out_lines.append(
             f"Minutos activos: {t_summary.get('total_minutes', 0)}, "
             f"promedio pkt/min: {t_summary.get('avg_packets', 0):.1f}, "
             f"pico pkt/min: {t_summary.get('max_packets', 0)}"
         )
 
     if summary.get("errors"):
-        print("\n=== LOGS SIN PROCESAR ===")
+        out_lines.append("\n=== LOGS SIN PROCESAR ===")
         for err in summary["errors"]:
-            print(f"  - {err}")
+            out_lines.append(f"  - {err}")
 
     if pcap_info:
-        print("\n=== DETALLE PCAP (capinfos / tshark) ===")
+        out_lines.append("\n=== DETALLE PCAP (capinfos / tshark) ===")
         for entry in pcap_info:
-            print(f"\nArchivo: {entry['pcap']}")
+            out_lines.append(f"\nArchivo: {entry['pcap']}")
             if entry.get("capinfos"):
-                print("-- capinfos --")
-                print(entry["capinfos"])
+                out_lines.append("-- capinfos --")
+                out_lines.append(entry["capinfos"] or "")
             if entry.get("conversations"):
-                print("-- tshark conv,ip --")
-                print(entry["conversations"])
+                out_lines.append("-- tshark conv,ip --")
+                out_lines.append(entry["conversations"] or "")
             if entry.get("protocols"):
-                print("-- tshark io,phs --")
-                print(entry["protocols"])
+                out_lines.append("-- tshark io,phs --")
+                out_lines.append(entry["protocols"] or "")
+
+    return "\n".join(out_lines)
 
 
 def emit_json(summary: Dict[str, List[Dict[str, object]]], pcap_info: List[Dict[str, object]]) -> None:
@@ -439,10 +463,29 @@ def main() -> int:
 
     log_files, pcaps = find_capture_files(base)
     if not log_files and not pcaps:
-        print(f"No se encontraron logs ni pcaps en {base}")
+        # En lugar de finalizar temprano, generamos un informe vacío para que la GUI
+        # tenga contenido que mostrar y el usuario comprenda la situación.
+        log(f"No se encontraron logs ni pcaps en {base}. Se generará un informe vacío.")
+        empty_summary: Dict[str, List[Dict[str, object]]] = {
+            "top_sources": [],
+            "top_destinations": [],
+            "flows": [],
+            "suspects": [],
+            "timeline": [],
+            "errors": [f"Directorio sin archivos de captura: {base}"]
+        }
+        report_text = generate_text_report(empty_summary, [], 0)
+        print(report_text, flush=True)
+        try:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_file = base / f"analysis_report_{ts}.txt"
+            out_file.write_text(report_text, encoding="utf-8")
+            print(f"\n[Saved report to {out_file}]", flush=True)
+        except Exception:
+            pass
         return 0
 
-    print(f"Analizando {len(log_files)} log(s) y {len(pcaps)} pcap(s) en {base}\n")
+    log(f"Analizando {len(log_files)} log(s) y {len(pcaps)} pcap(s) en {base}\n")
 
     analysis = parse_logs(log_files)
     summary = summarize_logs(analysis, args.top, args.suspect_threshold)
@@ -451,9 +494,22 @@ def main() -> int:
     if not args.skip_pcap:
         pcap_info = analyze_pcaps(pcaps, args.max_pcaps)
     else:
-        print("(Se omitió el análisis de pcaps por petición del usuario)")
+        log("(Se omitió el análisis de pcaps por petición del usuario)")
 
-    print_text_report(summary, pcap_info, args.top)
+    # Build textual report and print it (so GUI/stdout shows it) and save to a file
+    report_text = generate_text_report(summary, pcap_info, args.top)
+    print(report_text, flush=True)
+
+    # Save report to a timestamped file in the capture directory
+    try:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_file = base / f"analysis_report_{ts}.txt"
+        out_file.write_text(report_text, encoding="utf-8")
+        print(f"\n[Saved report to {out_file}]", flush=True)
+    except Exception:
+        # Non-fatal if saving fails
+        pass
+
     if args.json:
         emit_json(summary, pcap_info)
 
